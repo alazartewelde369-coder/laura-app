@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="am">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#05070d">
+<link rel="manifest" href="manifest.json">
+<title>ላውራ</title>
+<style>
+  html, body { margin:0; height:100%; background:#05070d; color:#eef2ff;
+               font-family:sans-serif; overflow:hidden; }
+  body { display:flex; flex-direction:column; align-items:center; justify-content:center;
+         width:100vw; height:100vh; height:100dvh; gap:3vh; }
+  #status { color:#d4af37; font-size:18px; text-align:center; padding:0 20px; min-height:1.4em; }
+  #orb { width:min(78vw,78vh); height:min(78vw,78vh); border-radius:50%; border:none; padding:0;
+         cursor:pointer; -webkit-tap-highlight-color:transparent;
+         background:radial-gradient(circle at 30% 30%, #8fd3ff, #2456e8 55%, #07113a);
+         box-shadow:0 0 60px #2d6cff66; opacity:.6;
+         transition:transform .4s, box-shadow .4s, opacity .4s; }
+  #orb.idle      { animation:breathe 4s ease-in-out infinite; }
+  #orb.listening { opacity:1; transform:scale(1.05); box-shadow:0 0 120px #6ec6ffcc; }
+  #orb.thinking  { opacity:.9; animation:spin 1.2s linear infinite; }
+  #orb.speaking  { opacity:1; animation:pulse .5s ease-in-out infinite; }
+  @keyframes breathe { 50% { transform:scale(1.04); } }
+  @keyframes pulse   { 50% { transform:scale(1.12); box-shadow:0 0 140px #6ec6ffdd; } }
+  @keyframes spin    { to { filter:hue-rotate(360deg); } }
+  #reply { font-size:22px; line-height:1.6; text-align:center; padding:0 24px;
+           max-height:22vh; overflow-y:auto; min-height:1.6em; }
+</style>
+</head>
+<body>
+<div id="status">ነካ አድርገኝ</div>
+<button id="orb" class="idle" aria-label="ላውራ"></button>
+<div id="reply"></div>
+
+<script>
+const WEBHOOK_URL = 'https://alazar0000.app.n8n.cloud/webhook/laura';
+const SECRET = 'PLACEHOLDER_SECRET';
+
+const orb = document.getElementById('orb');
+const statusEl = document.getElementById('status');
+const replyEl = document.getElementById('reply');
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+let state = 'idle';
+let gotResult = false;
+
+const MSG = {
+  tap: 'ነካ አድርገኝ',
+  listening: 'አዳምጣለሁ...',
+  thinking: 'እያሰብኩ ነው...',
+  unsupported: 'ይህ ብሮውዘር ድምፅ ማወቅ አይደግፍም። Chrome ተጠቀም።',
+  micDenied: 'ማይክሮፎን ፈቃድ ያስፈልጋል። ፈቃድ ሰጥተህ ገጹን አድስ።',
+  empty: 'ምንም አልሰማሁም። እባክህ ደግመህ ንገረኝ።',
+  network: 'ግንኙነት አልተሳካም። ኢንተርኔትህን አረጋግጥ።',
+  server: 'ከአገልጋዩ ስህተት መጣ። እባክህ ቆይተህ ደግመህ ሞክር።',
+  auth: 'የይለፍ ቃሉ (SECRET) ትክክል አይደለም።',
+  noReply: 'መልስ አልተገኘም። እባክህ ደግመህ ሞክር።',
+  generic: 'ስህተት ተፈጠረ። እባክህ ደግመህ ሞክር።'
+};
+
+function setState(s, status) {
+  state = s;
+  orb.className = s;
+  if (status !== undefined) statusEl.textContent = status;
+}
+
+function showError(text) {
+  setState('idle', MSG.tap);
+  replyEl.textContent = text;
+}
+
+function speak(text) {
+  return new Promise(resolve => {
+    if (!('speechSynthesis' in window)) { resolve(); return; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'am-ET';
+    u.rate = 1;
+    u.onstart = () => setState('speaking', '');
+    u.onend = u.onerror = () => resolve();
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  });
+}
+
+async function send(message) {
+  setState('thinking', MSG.thinking);
+  let res;
+  try {
+    res = await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Laura-Secret': SECRET },
+      body: JSON.stringify({ message })
+    });
+  } catch (e) {
+    return showError(MSG.network);
+  }
+  if (!res.ok) {
+    return showError(res.status === 401 || res.status === 403 ? MSG.auth : MSG.server);
+  }
+  let data;
+  try { data = await res.json(); } catch (e) { return showError(MSG.server); }
+  const reply = data && typeof data.reply === 'string' ? data.reply.trim() : '';
+  if (!reply) return showError(MSG.noReply);
+
+  replyEl.textContent = reply;
+  await speak(reply);
+  setState('idle', MSG.tap);
+}
+
+function startListening() {
+  if (!SR) return showError(MSG.unsupported);
+  if (state === 'thinking') return;
+  if (state === 'speaking') { speechSynthesis.cancel(); }
+  if (state === 'listening') { try { rec.stop(); } catch (e) {} return; }
+
+  try { speechSynthesis.getVoices(); } catch (e) {}
+
+  rec = new SR();
+  rec.lang = 'am-ET';
+  rec.continuous = false;
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  gotResult = false;
+
+  rec.onstart = () => { replyEl.textContent = ''; setState('listening', MSG.listening); };
+
+  rec.onresult = e => {
+    gotResult = true;
+    const t = (e.results[0][0].transcript || '').trim();
+    if (!t) return showError(MSG.empty);
+    send(t);
+  };
+
+  rec.onerror = e => {
+    gotResult = true;
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') showError(MSG.micDenied);
+    else if (e.error === 'no-speech' || e.error === 'aborted') showError(MSG.empty);
+    else if (e.error === 'network') showError(MSG.network);
+    else showError(MSG.generic);
+  };
+
+  rec.onend = () => {
+    if (!gotResult && state === 'listening') showError(MSG.empty);
+  };
+
+  try { rec.start(); } catch (e) { showError(MSG.generic); }
+}
+
+orb.addEventListener('click', startListening);
+
+if (!SR) { statusEl.textContent = MSG.unsupported; }
+</script>
+</body>
+  </html>
